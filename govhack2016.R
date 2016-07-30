@@ -1,13 +1,11 @@
 library(shiny)
-
 library(dplyr)
 library(ggmap)
 library(sp)
 library(leaflet)
 library(DT)
-library(rcdimple)
-library(howfar)
-library(c3)
+
+source('R/import_spatial.R')
 
 # http://stackoverflow.com/questions/34348737/r-leaflet-how-to-click-on-map-and-add-a-circle
 
