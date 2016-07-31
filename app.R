@@ -4,13 +4,12 @@ library(ggmap)
 library(sp)
 library(leaflet)
 library(DT)
+library(rgdal)
 
 source('R/import_spatial.R')
 
+
 # http://stackoverflow.com/questions/34348737/r-leaflet-how-to-click-on-map-and-add-a-circle
-
-#folder <- 'G:/Advisory and Intelligence/Intelligence and Analysis/DATA_STORE'
-
 ui <- shinyUI(
     navbarPage("My Livability", id="nav",
 
@@ -42,9 +41,9 @@ background: transparent; height: 25px; border: 0px;
                             1,
                             value = 0, step = .1, ticks = FALSE, width = '80%'
                 ),
-                tags$p('choose between Punlic Transport on the left and driving your own car on the right'),
+                tags$p('choose between Public Transport on the left and driving your own car on the right'),
                 sliderInput("comm", h3("Community"),
-                            -1,
+                            0,
                             1,
                             value = 0, step = .1, ticks = FALSE, width = '80%'
                 ),
@@ -61,12 +60,21 @@ background: transparent; height: 25px; border: 0px;
                             value = 0, step = .1, ticks = FALSE, width = '80%'
                 ),
                 tags$p('choose your preference for Restaurant and Dining Options'),
-                sliderInput("ent", h3("Entertainment"),
+                sliderInput("ent", h3("Education"),
                             0,
                             1,
                             value = 0, step = .1, ticks = FALSE, width = '80%'
                 ),
-                tags$p('choose your preference for Entertainment Options')
+                tags$p('choose your preference for Education Options'),
+                actionButton('do', 'Click Here then View Map Tab', label = h3('Calculate Livability'), width = '30%', height = '50px'),
+                selectInput("get", label = h3("How Many Suburbs do you want to compare?"), 
+                            choices = list("Handfull" = 20, "Some" = 150, "Half" = 800, "All" = 2000), 
+                            selected = 20, width = '30%'),
+                sliderInput("buffer", h3("Buffer Distance"),
+                            0.1,
+                            10,
+                            value = 1, step = 0.1
+                )
                ),
         tabPanel('Map',
             div(class="outer",
@@ -76,39 +84,35 @@ background: transparent; height: 25px; border: 0px;
                 ),
                 #tags$style('.leaflet {height: 100%; width: 100%;}'),
                 leafletOutput("map", width = "100%", height = '100%'),
-                absolutePanel(id = "controls", class = "panel panel-default", fixed = TRUE,
-                              draggable = TRUE, top = 60, left = "auto", right = 20, bottom = "auto",
-                              width = 330, height = "auto",
-                              sliderInput("buffer", h3("Buffer Distance"),
-                                          0.5,
-                                          10,
-                                          value = 5, step = 0.5
-                              )
-                ),
+                # absolutePanel(id = "controls", left = class = "panel panel-default", fixed = TRUE,
+                #               draggable = TRUE, top = 60, left = "auto", right = 20, bottom = "auto",
+                #               width = 330, height = "auto",
+                #               sliderInput("buffer", h3("Buffer Distance"),
+                #                           0.1,
+                #                           10,
+                #                           value = 1, step = 0.1
+                #               )
+                # ),
                 tags$div(id="cite",
                          'Data compiled by ', tags$em('Psychedelic Prosthetics'), ', GovHack 2016.'
                 )
             )
 
         ),
-        tabPanel('Report',
-                 h3('Risk Profile'),
-                 dimpleOutput('risk_plot', width="100%")
+        tabPanel('Data',
+                 h3('Data Summary'),
+                 DT::dataTableOutput("table1"),
+                 h3('Livibility Choices'),
+                 DT::dataTableOutput("table2")
                  )
         )
 )
 
 server <- shinyServer(function(input, output, session) {
 
-    # get unigue foi types for dropdown
-    #foi.types <- list(get.unique(system.file("db.sqlite", package = "howfar"),
-                                # 'foi', 'FEATURE_SU'))
-    #names(foi.types) <- as.character(foi.types)
-
-    #updateSelectInput(session = session, inputId = "select_fld", choices = foi.types)
-
-    ## One alternative: store circles data?
-    ## I dont actually implement this, but you would do this in the observer as well
+    # get suburbs calcs
+    source('R/data_clean.R')
+    
     dat <- reactiveValues(circs = data.frame(lng=numeric(),
                                              lat=numeric(),
                                              address=character()))
@@ -118,16 +122,82 @@ server <- shinyServer(function(input, output, session) {
                           Name = character(),
                           Type = character(),
                           distance = character())
+    
+    dat$choices <- data.frame(Environment = numeric(),
+                              Transport = numeric(),
+                              Community = numeric(),
+                              Recreation = numeric(),
+                              Food = numeric(),
+                              Education = numeric())
+    
+    dat$subs <- subs
+    sp.subs <- readOGR('shp', 'SSC_2011_VIC_SIM', stringsAsFactors = F)
+    
+    observeEvent(input$do, {
+            subs <- dat$subs
+            subs <- calc_slider(input$env, 'built.p', 'reserve.p', 'env',  subs)
+            subs <- calc_slider(input$trans, 'rail.p', 'roads.p', 'trans',  subs)
+            subs <- mutate(subs, comm = community.p * input$comm)
+            subs <- mutate(subs, rec = sport.p * input$rec)
+            #subs <- mutate(subs, food = zomato * input$food)
+            #subs <- calc_slider(input$ent, 'rail.p', 'roads.p', 'ent',  subs)
+            
+            subs <- subs %>%
+                mutate(livibility = (env + trans + comm + rec) * 100,
+                       livibility = ifelse(is.na(livibility), 0, livibility))
+        
+            dat$subs <- subs
 
+            dat$sp.subs <- sp.subs
+            
+            # save values
+            isolate(dat$choices <- rbind(dat$choices, data.frame(Environment = input$env,
+                                                                 Transport = input$trans,
+                                                                 Community = input$comm,
+                                                                 Recreation = input$rec,
+                                                                 Food = input$food,
+                                                                 Education = input$ent)))
+    })
+    
+    
     ## Make your initial map
     output$map <- renderLeaflet({
+        
+        # if ('livibility' %in% colnames(dat$subs)) {
+        isolate(
+            sp.subs@data <- left_join(mutate(sp.subs@data, SSC_CODE = as.integer(SSC_CODE)),
+                                      select(dat$subs, SSC_CODE, livibility))
+        )
+        # isolate(
+        #     sp.subs <- sp.subs[sp.subs$livibility > sort(sp.subs$livibility, decreasing = T)[input$get], ]
+        # )
+        
+        pal <- colorQuantile('RdYlBu', sp.subs$livibility, n = 12, na.color = 'grey')
+        #     
+        # } else {
+        #     sp.subs$livibility <- 100
+        #     pal <- colorQuantile('Greens', dat$sp.subs$livibility, n = 5, na.color = 'grey')
+        # }
+        
         leaflet() %>%
             setView(lng = 145, lat = -38, zoom = 11) %>%
             addProviderTiles("CartoDB.Positron") %>%
-            addScaleBar('bottomright')
+            addScaleBar('bottomright') %>%
+            addPolygons(data = sp.subs,
+                        color = ~pal(livibility),
+                        group = 'Livibility') %>%
+            addLayersControl(
+                overlayGroups = 'Livibility',
+                options = layersControlOptions(collapsed = TRUE)
+            ) %>%
+            addLegend("bottomright", pal = pal, values = sp.subs$livibility,
+                      title = "Livability",
+                      #labFormat = labelFormat(prefix = "$"),
+                      opacity = 1
+            )
+        
     })
-
-
+    
     ## Observe mouse clicks and add circles
     observeEvent(input$map_click, {
 
@@ -189,6 +259,9 @@ server <- shinyServer(function(input, output, session) {
                                   risk = ifelse(Type %in% c('primary school','aged care'), 5,
                                                 ifelse(Type %in% c('secondary school','general hospital'), 4, 1)))
 
+                
+
+                
                 if (nrow(foi) > 0) {
                     leafletProxy('map') %>%
                         addAwesomeMarkers(data = foi, lat = ~latitude, lng = ~longitude,
@@ -203,11 +276,54 @@ server <- shinyServer(function(input, output, session) {
 
                 }
  
+                
+                
+                # parse suburb e.g
+                cells <- revgeocode(c(clng,clat),output = 'all')$results[[1]]$address_components[[3]]$short_name
+                
+                # import data
+                zomato <- read_csv("csv/suburbs_br_rest_zomato2.csv")
+                
+                # find suburb
+                suburb_find <- zomato[zomato$suburb == cells,]
+                
+                # if statement (if suburb not available, show no map, otherwise create json file)
+                if (nrow(suburb_find) > 0) {
+                    leafletProxy('map') %>%
+                        addMarkers(data = suburb_find,
+                                   lng = ~lon, lat = ~lat,
+                                   popup = paste("Name:", suburb_find$name, "<br>",
+                                               "Cuisines:", suburb_find$cuisines, "<br>",
+                                               "User Rating:", suburb_find$user_rating, "<br>",
+                                               "Link:", suburb_find$href)
+                        )
+                }
+                    
+                
 
         })
     })
+    
+    
+    output$table1 <- DT::renderDataTable({
+        datatable(dat$subs,
+                  class = 'dt-body nowrap',
+                  extensions = c('Buttons','Responsive'),
+                  options = list(pageLength = 5,
+                                 dom = 'Bfrtip',
+                                 buttons = c('csv', 'excel'))) #%>%
+            #formatRound(c('longitude','latitude'), 4)
+    })
 
-
+    output$table2 <- DT::renderDataTable({
+        datatable(dat$choices,
+                  class = 'dt-body nowrap',
+                  extensions = c('Buttons','Responsive'),
+                  options = list(pageLength = 5,
+                                 dom = 'Bfrtip',
+                                 buttons = c('csv', 'excel'))) #%>%
+        #formatRound(c('longitude','latitude'), 4)
+    })
 
 
 
